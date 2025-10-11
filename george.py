@@ -127,29 +127,50 @@ class NonLinearSignalGenerator:
             reversion_rate=Config.SENTIMENT_REVERSION_RATE
         )
 
-        # 2️⃣ Competitor Sentiment (non-linear inverse to Chubb sentiment)
-        # Adds some noise to make it less deterministic
-        competitor_sentiment = 0.7 - np.power(chubb_sentiment, 1.2) + \
-                               np.random.normal(0, Config.CHUBB_SENTIMENT_VOLATILITY / 2, n_days)
+        # 2️⃣ Competitor Sentiment (highly independent with different dynamics)
+        # Use separate mean-reverting process with very different parameters
+        competitor_base = self._mean_reverting_random_walk(
+            n_days,
+            mean=0.52,
+            volatility=0.10,
+            start=0.48,
+            reversion_rate=0.08
+        )
+        # Add random spikes/dips to make it more distinct
+        competitor_shocks = np.random.choice([0, -0.05, 0.05], size=n_days, p=[0.9, 0.05, 0.05])
+        # Very weak inverse relationship to Chubb (correlation ~0.05-0.15)
+        competitor_sentiment = competitor_base * 0.92 + (1 - chubb_sentiment) * 0.08 + competitor_shocks
         competitor_sentiment = np.clip(competitor_sentiment, 0.3, 0.9)
 
-        # 3️⃣ Stock Returns (non-linear function of sentiment + market)
+        # 3️⃣ Stock Returns (more randomized, reduced correlation with each other)
         market_index_return = np.random.normal(Config.MARKET_RETURN_MEAN, Config.MARKET_RETURN_VOLATILITY, n_days)
-        # Chubb stock influenced more by its own sentiment and market
-        chubb_stock_return = np.tanh((chubb_sentiment - 0.6) * 3) * 0.02 + 0.3 * market_index_return + \
-                             np.random.normal(0, 0.005, n_days)
-        # Competitor stock influenced by its sentiment and market
-        competitor_stock_return = np.tanh((competitor_sentiment - 0.6) * 3) * 0.025 + 0.25 * market_index_return + \
-                                  np.random.normal(0, 0.005, n_days)
+        
+        # Chubb stock: Diverse sources of randomness (correlation with market ~0.30-0.40)
+        chubb_idiosyncratic = np.random.normal(0, 0.012, n_days)  # Company-specific shocks
+        chubb_momentum = np.random.choice([-1, 0, 1], size=n_days, p=[0.3, 0.4, 0.3]) * 0.003  # Momentum effects
+        chubb_stock_return = (0.15 * market_index_return + 
+                             0.10 * np.tanh((chubb_sentiment - 0.6) * 2) * 0.015 + 
+                             0.65 * chubb_idiosyncratic +
+                             0.15 * chubb_momentum)
+        
+        # Competitor stock: Different random process (correlation with market ~0.25-0.35, with Chubb ~0.15-0.25)
+        competitor_idiosyncratic = np.random.normal(0, 0.015, n_days)  # Different company-specific variance
+        competitor_sector = np.random.normal(0, 0.008, n_days)  # Sector-specific noise
+        competitor_momentum = np.random.choice([-1, 0, 1], size=n_days, p=[0.35, 0.3, 0.35]) * 0.004  # Different momentum
+        competitor_stock_return = (0.25 * market_index_return + 
+                                  0.08 * np.tanh((competitor_sentiment - 0.55) * 2) * 0.012 + 
+                                  0.50 * competitor_idiosyncratic +
+                                  0.12 * competitor_sector +
+                                  0.05 * competitor_momentum)
 
         # 4️⃣ Economic signal (GDP growth, smooth trend + noise)
         gdp_growth = Config.GDP_INITIAL_GROWTH + np.cumsum(np.random.normal(0, Config.GDP_GROWTH_VOLATILITY, n_days))
         gdp_growth = np.clip(gdp_growth, 0.0, 0.04) # Keep GDP growth realistic
 
-        # 5️⃣ Customer engagement (beta distributed + sentiment influence)
-        # Engagement is a mix of a base random component and Chubb sentiment
-        engagement = np.random.beta(Config.CUSTOMER_ENGAGEMENT_BETA_A, Config.CUSTOMER_ENGAGEMENT_BETA_B, n_days) * 0.5 + \
-                     chubb_sentiment * 0.5 + np.random.normal(0, 0.05, n_days)
+        # 5️⃣ Customer engagement (more independent, less correlated with sentiment)
+        # Mostly based on beta distribution with weak sentiment influence (correlation ~0.2-0.3)
+        engagement_base = np.random.beta(Config.CUSTOMER_ENGAGEMENT_BETA_A, Config.CUSTOMER_ENGAGEMENT_BETA_B, n_days)
+        engagement = engagement_base * 0.75 + chubb_sentiment * 0.15 + np.random.normal(0, 0.08, n_days)
         engagement = np.clip(engagement, 0.0, 1.0) # Scale engagement between 0 and 1
 
         # Combine into DataFrame
