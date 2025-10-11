@@ -1,558 +1,469 @@
 import pandas as pd
 import numpy as np
-from scipy import stats
-from sklearn.preprocessing import LabelEncoder, StandardScaler
-from datetime import datetime, timedelta
+from scipy.stats import ks_2samp, entropy
+from sklearn.preprocessing import StandardScaler
+from sklearn.ensemble import RandomForestClassifier
+from datetime import datetime
 import warnings
-import multiprocessing as mp
-from functools import partial
-import os
 warnings.filterwarnings('ignore')
 
-# Configure for multi-GPU and multi-CPU
+import matplotlib.pyplot as plt
+import seaborn as sns
+import os
+
+# Set environment variables for multi-threading
 os.environ['OMP_NUM_THREADS'] = '40'
 os.environ['MKL_NUM_THREADS'] = '40'
-os.environ['NUMEXPR_NUM_THREADS'] = '40'
 
 import torch
 if torch.cuda.is_available():
-    print(f"CUDA Available: {torch.cuda.device_count()} GPUs detected")
-    for i in range(torch.cuda.device_count()):
-        print(f"  GPU {i}: {torch.cuda.get_device_name(i)}")
+    print(f"✓ CUDA: {torch.cuda.device_count()} GPUs detected")
 else:
-    print("CUDA not available, using CPU only")
+    print("⚠ CPU only mode")
 
+# ===============================
+# Configuration Class
+# ===============================
+class Config:
+    """Centralized configuration for the data augmentation pipeline."""
+    N_SAMPLES_BALANCED: int = 500
+    TARGET_COLUMN: str = 'Churn'
+    RANDOM_STATE: int = 42
+    SIGNAL_START_DATE: str = '2018-01-01'
+    SIGNAL_END_DATE: str = '2023-12-31'
+    CHUBB_SENTIMENT_MEAN: float = 0.65
+    CHUBB_SENTIMENT_VOLATILITY: float = 0.05
+    CHUBB_SENTIMENT_START: float = 0.6
+    SENTIMENT_REVERSION_RATE: float = 0.15 # Rate at which sentiment reverts to mean
+    MARKET_RETURN_MEAN: float = 0.0005
+    MARKET_RETURN_VOLATILITY: float = 0.01
+    GDP_INITIAL_GROWTH: float = 0.02
+    GDP_GROWTH_VOLATILITY: float = 0.0005
+    CUSTOMER_ENGAGEMENT_BETA_A: float = 2
+    CUSTOMER_ENGAGEMENT_BETA_B: float = 5
+    OUTPUT_BALANCED_CSV: str = 'balanced_sample_500.csv'
+    OUTPUT_AUGMENTED_CSV: str = 'augmented_with_signals.csv'
+    OUTPUT_SIGNALS_CSV: str = 'synthetic_time_series_signals.csv'
+    PLOT_DIR: str = 'plots' # Directory for saving plots
 
-class DatasetAnalyzer:
-    """Analyzes original dataset and extracts statistical properties"""
-    
-    def __init__(self, df, n_jobs=40):
+# Ensure plot directory exists
+os.makedirs(Config.PLOT_DIR, exist_ok=True)
+
+# ===============================
+# 1️⃣ Balanced Sampler
+# ===============================
+class BalancedDataSampler:
+    """Balances churn vs non-churn customers using undersampling."""
+    def __init__(self, df: pd.DataFrame, target_col: str = Config.TARGET_COLUMN):
         self.df = df
-        self.n_jobs = n_jobs
-        self.stats = {}
-        self.correlations = {}
+        self.target_col = target_col
+
+    def get_balanced_sample(self, n_samples: int = Config.N_SAMPLES_BALANCED) -> pd.DataFrame:
+        """
+        Generates a balanced sample of the DataFrame by undersampling.
+
+        Args:
+            n_samples: The total number of samples desired in the balanced DataFrame.
+                       It will be split equally between the two target classes.
+
+        Returns:
+            A new DataFrame with an approximately equal number of samples for each target class.
+        """
+        churn_counts = self.df[self.target_col].value_counts()
         
-    def _analyze_single_numerical(self, col):
-        """Analyze a single numerical column"""
-        return col, {
-            'mean': self.df[col].mean(),
-            'std': self.df[col].std(),
-            'min': self.df[col].min(),
-            'max': self.df[col].max(),
-            'median': self.df[col].median(),
-            'q25': self.df[col].quantile(0.25),
-            'q75': self.df[col].quantile(0.75),
-            'skewness': self.df[col].skew(),
-            'kurtosis': self.df[col].kurtosis()
-        }
+        # Determine samples per class, ensuring we don't request more than available
+        samples_per_class = n_samples // 2
         
-    def analyze_numerical(self):
-        """Analyze numerical columns in parallel"""
-        numerical_cols = self.df.select_dtypes(include=[np.number]).columns
-        print(f"Analyzing {len(numerical_cols)} numerical columns...")
+        df_churn_0 = self.df[self.df[self.target_col] == 0]
+        df_churn_1 = self.df[self.df[self.target_col] == 1]
+
+        n_0 = min(samples_per_class, len(df_churn_0))
+        n_1 = min(samples_per_class, len(df_churn_1))
         
-        with mp.Pool(processes=min(self.n_jobs, len(numerical_cols))) as pool:
-            results = pool.map(self._analyze_single_numerical, numerical_cols)
-        
-        for col, stats in results:
-            self.stats[col] = stats
+        if n_0 < samples_per_class or n_1 < samples_per_class:
+            print(f"Warning: Could not get {samples_per_class} samples for each class. "
+                  f"Got {n_0} for class 0 and {n_1} for class 1.")
             
-    def analyze_categorical(self):
-        """Analyze categorical columns"""
-        categorical_cols = self.df.select_dtypes(include=['object']).columns
-        print(f"Analyzing {len(categorical_cols)} categorical columns...")
+        df_churn_0_sampled = df_churn_0.sample(n=n_0, random_state=Config.RANDOM_STATE)
+        df_churn_1_sampled = df_churn_1.sample(n=n_1, random_state=Config.RANDOM_STATE)
         
-        for col in categorical_cols:
-            self.stats[col] = {
-                'unique_values': self.df[col].unique().tolist(),
-                'value_counts': self.df[col].value_counts(normalize=True).to_dict()
-            }
-            
-    def analyze_correlations(self):
-        """Analyze correlations between numerical features"""
-        print("Computing correlation matrix...")
-        numerical_df = self.df.select_dtypes(include=[np.number])
-        self.correlations = numerical_df.corr().to_dict()
+        df_balanced = pd.concat([df_churn_0_sampled, df_churn_1_sampled]).sample(
+            frac=1, random_state=Config.RANDOM_STATE
+        ).reset_index(drop=True)
         
-    def analyze_churn_patterns(self):
-        """Analyze patterns related to churn"""
-        if 'Churn' in self.df.columns:
-            print("Analyzing churn patterns...")
-            churn_stats = {}
-            for col in self.df.columns:
-                if col != 'Churn':
-                    if self.df[col].dtype in [np.float64, np.int64]:
-                        churn_stats[col] = {
-                            'churn_mean': self.df[self.df['Churn']==1][col].mean(),
-                            'no_churn_mean': self.df[self.df['Churn']==0][col].mean()
-                        }
-            self.stats['churn_patterns'] = churn_stats
-            
-    def run_full_analysis(self):
-        """Run complete analysis"""
-        print("\n" + "="*60)
-        print("Statistical Analysis of Original Dataset")
-        print("="*60)
-        self.analyze_numerical()
-        self.analyze_categorical()
-        self.analyze_correlations()
-        self.analyze_churn_patterns()
-        print("Analysis complete!")
-        return self.stats, self.correlations
+        print(f"Balanced sample created with {len(df_balanced)} rows. "
+              f"Class 0: {len(df_churn_0_sampled)}, Class 1: {len(df_churn_1_sampled)}")
+        return df_balanced
 
 
-class ExternalDataSimulator:
+# ===============================
+# 2️⃣ Non-Linear Signal Generator
+# ===============================
+class NonLinearSignalGenerator:
     """
-    Simulates EXTERNAL independent data sources that exist in real world:
-    - Company news sentiment (from news APIs)
-    - Stock market data (from financial markets)
-    - Competitor sentiment (from competitor news)
-    - Vehicle model news (from automotive industry)
-    - Economic indicators (from market data)
+    Generates non-linear, correlated synthetic signals to augment dataset.
+    These signals are not learned from real time-series data but are
+    mathematically generated to introduce new, potentially relevant features.
     """
-    
-    def __init__(self, df):
-        self.df = df
-        self.start_date = pd.to_datetime('2018-01-01')
-        self.end_date = pd.to_datetime('2023-12-31')
-        
-    def generate_time_series_data(self):
-        """Generate time-series external data that changes over time"""
-        
-        # Create daily time series for the date range
+    def __init__(self, start_date: str = Config.SIGNAL_START_DATE, 
+                 end_date: str = Config.SIGNAL_END_DATE):
+        self.start_date = pd.to_datetime(start_date)
+        self.end_date = pd.to_datetime(end_date)
+
+    def generate_signals(self) -> pd.DataFrame:
+        """
+        Generates a DataFrame of synthetic time-series signals.
+        """
         date_range = pd.date_range(self.start_date, self.end_date, freq='D')
         n_days = len(date_range)
-        
-        print("\n" + "="*60)
-        print("Generating External Market Data (Independent of Customers)")
-        print("="*60)
-        
-        # ==================================================================
-        # RULE 1: COMPANY NEWS SENTIMENT (Independent time series)
-        # ==================================================================
-        print("\n[RULE 1] Company News Sentiment")
-        print("  - Simulates daily news sentiment from media sources")
-        print("  - Random walk with mean reversion")
-        print("  - Range: 0.3 to 0.9 (0=very negative, 1=very positive)")
-        
-        company_sentiment_ts = self._generate_sentiment_time_series(
-            n_days, 
-            mean=0.65, 
-            volatility=0.05,
-            start_value=0.6
+        print(f"Generating {n_days} days of non-linear signals between {self.start_date.date()} and {self.end_date.date()}...")
+
+        # 1️⃣ Base Sentiment (Chubb) - Mean-reverting random walk
+        chubb_sentiment = self._mean_reverting_random_walk(
+            n_days,
+            mean=Config.CHUBB_SENTIMENT_MEAN,
+            volatility=Config.CHUBB_SENTIMENT_VOLATILITY,
+            start=Config.CHUBB_SENTIMENT_START,
+            reversion_rate=Config.SENTIMENT_REVERSION_RATE
         )
-        
-        # ==================================================================
-        # RULE 2: COMPANY STOCK PRICE (Correlated with sentiment)
-        # ==================================================================
-        print("\n[RULE 2] Company Stock Performance")
-        print("  - Simulates stock market data from exchanges")
-        print("  - 70% correlated with company sentiment")
-        print("  - Daily returns: -3% to +3%")
-        
-        company_stock_ts = self._generate_stock_returns(
-            company_sentiment_ts,
-            correlation=0.7,
-            volatility=0.015
-        )
-        
-        # ==================================================================
-        # RULE 3: COMPETITOR SENTIMENT (Inverse relationship)
-        # ==================================================================
-        print("\n[RULE 3] Competitor News Sentiment")
-        print("  - Simulates competitor news from media")
-        print("  - 50% inverse correlation with our company")
-        print("  - When we do well, they often do worse")
-        
-        competitor_sentiment_ts = self._generate_competitor_sentiment(
-            company_sentiment_ts,
-            inverse_correlation=0.5
-        )
-        
-        # ==================================================================
-        # RULE 4: COMPETITOR STOCK PRICE
-        # ==================================================================
-        print("\n[RULE 4] Competitor Stock Performance")
-        print("  - Competitor stock from market data")
-        print("  - 65% correlated with their sentiment")
-        
-        competitor_stock_ts = self._generate_stock_returns(
-            competitor_sentiment_ts,
-            correlation=0.65,
-            volatility=0.018
-        )
-        
-        # ==================================================================
-        # RULE 5: VEHICLE MODEL NEWS SENTIMENT
-        # ==================================================================
-        print("\n[RULE 5] Vehicle Model News Sentiment")
-        print("  - Simulates automotive industry news")
-        print("  - Different models have different sentiment patterns")
-        print("  - Based on recalls, reviews, safety ratings")
-        
-        vehicle_sentiment_ts = self._generate_vehicle_sentiment(n_days)
-        
-        # ==================================================================
-        # RULE 6: ECONOMIC INDICATOR (GDP Growth Rate)
-        # ==================================================================
-        print("\n[RULE 6] Economic Indicator (GDP Growth)")
-        print("  - Quarterly GDP growth rate")
-        print("  - Affects overall market sentiment")
-        print("  - Range: -2% to +4%")
-        
-        gdp_growth_ts = self._generate_economic_indicator(n_days)
-        
-        # ==================================================================
-        # RULE 7: INDUSTRY TREND INDEX
-        # ==================================================================
-        print("\n[RULE 7] Auto Insurance Industry Trend Index")
-        print("  - Overall industry health score (0-100)")
-        print("  - Based on claim rates, regulations, competition")
-        
-        industry_index_ts = self._generate_industry_index(n_days)
-        
-        # Create external data DataFrame
-        external_data = pd.DataFrame({
+
+        # 2️⃣ Competitor Sentiment (non-linear inverse to Chubb sentiment)
+        # Adds some noise to make it less deterministic
+        competitor_sentiment = 0.7 - np.power(chubb_sentiment, 1.2) + \
+                               np.random.normal(0, Config.CHUBB_SENTIMENT_VOLATILITY / 2, n_days)
+        competitor_sentiment = np.clip(competitor_sentiment, 0.3, 0.9)
+
+        # 3️⃣ Stock Returns (non-linear function of sentiment + market)
+        market_index_return = np.random.normal(Config.MARKET_RETURN_MEAN, Config.MARKET_RETURN_VOLATILITY, n_days)
+        # Chubb stock influenced more by its own sentiment and market
+        chubb_stock_return = np.tanh((chubb_sentiment - 0.6) * 3) * 0.02 + 0.3 * market_index_return + \
+                             np.random.normal(0, 0.005, n_days)
+        # Competitor stock influenced by its sentiment and market
+        competitor_stock_return = np.tanh((competitor_sentiment - 0.6) * 3) * 0.025 + 0.25 * market_index_return + \
+                                  np.random.normal(0, 0.005, n_days)
+
+        # 4️⃣ Economic signal (GDP growth, smooth trend + noise)
+        gdp_growth = Config.GDP_INITIAL_GROWTH + np.cumsum(np.random.normal(0, Config.GDP_GROWTH_VOLATILITY, n_days))
+        gdp_growth = np.clip(gdp_growth, 0.0, 0.04) # Keep GDP growth realistic
+
+        # 5️⃣ Customer engagement (beta distributed + sentiment influence)
+        # Engagement is a mix of a base random component and Chubb sentiment
+        engagement = np.random.beta(Config.CUSTOMER_ENGAGEMENT_BETA_A, Config.CUSTOMER_ENGAGEMENT_BETA_B, n_days) * 0.5 + \
+                     chubb_sentiment * 0.5 + np.random.normal(0, 0.05, n_days)
+        engagement = np.clip(engagement, 0.0, 1.0) # Scale engagement between 0 and 1
+
+        # Combine into DataFrame
+        signals_df = pd.DataFrame({
             'date': date_range,
-            'company_sentiment': company_sentiment_ts,
-            'company_stock_return': company_stock_ts,
-            'competitor_sentiment': competitor_sentiment_ts,
-            'competitor_stock_return': competitor_stock_ts,
-            'vehicle_news_sentiment': vehicle_sentiment_ts,
-            'gdp_growth_rate': gdp_growth_ts,
-            'industry_trend_index': industry_index_ts
+            'chubb_sentiment': chubb_sentiment,
+            'competitor_sentiment': competitor_sentiment,
+            'chubb_stock_return': chubb_stock_return,
+            'competitor_stock_return': competitor_stock_return,
+            'market_index_return': market_index_return,
+            'gdp_growth': gdp_growth,
+            'customer_engagement': engagement
         })
-        
-        return external_data
-    
-    def _generate_sentiment_time_series(self, n_days, mean, volatility, start_value):
-        """Generate sentiment using random walk with mean reversion"""
-        sentiment = np.zeros(n_days)
-        sentiment[0] = start_value
-        
-        for i in range(1, n_days):
-            # Mean reversion: sentiment drifts back to mean
-            drift = (mean - sentiment[i-1]) * 0.1
-            shock = np.random.normal(0, volatility)
-            sentiment[i] = sentiment[i-1] + drift + shock
-            
-        # Clip to valid range
-        sentiment = np.clip(sentiment, 0.3, 0.9)
-        return sentiment
-    
-    def _generate_stock_returns(self, sentiment_ts, correlation, volatility):
-        """Generate stock returns correlated with sentiment"""
-        n_days = len(sentiment_ts)
-        
-        # Normalize sentiment to returns (-2% to +2%)
-        base_returns = (sentiment_ts - 0.6) * 0.05
-        
-        # Add correlated noise
-        uncorrelated_noise = np.random.normal(0, volatility, n_days)
-        correlated_noise = (np.random.normal(0, volatility, n_days) * correlation + 
-                           uncorrelated_noise * (1 - correlation))
-        
-        stock_returns = base_returns + correlated_noise
-        return stock_returns
-    
-    def _generate_competitor_sentiment(self, company_sentiment, inverse_correlation):
-        """Generate competitor sentiment with inverse correlation"""
-        n_days = len(company_sentiment)
-        
-        # Inverse relationship
-        base_competitor = 1 - company_sentiment + 0.6  # Shift back to 0.3-0.9 range
-        
-        # Add some independence
-        independent_noise = np.random.normal(0, 0.08, n_days)
-        competitor_sentiment = base_competitor * inverse_correlation + independent_noise
-        
-        return np.clip(competitor_sentiment, 0.3, 0.9)
-    
-    def _generate_vehicle_sentiment(self, n_days):
-        """Generate vehicle model sentiment (cycles and events)"""
-        # Simulate product cycles and recall events
-        base_sentiment = 0.7
-        
-        # Seasonal cycle (new model releases)
-        t = np.arange(n_days)
-        seasonal = 0.1 * np.sin(2 * np.pi * t / 365)
-        
-        # Random events (recalls, awards)
-        events = np.random.choice([0, -0.2, 0.1], size=n_days, p=[0.95, 0.03, 0.02])
-        events_smoothed = pd.Series(events).rolling(30, min_periods=1).mean().values
-        
-        sentiment = base_sentiment + seasonal + events_smoothed + np.random.normal(0, 0.05, n_days)
-        return np.clip(sentiment, 0.4, 0.95)
-    
-    def _generate_economic_indicator(self, n_days):
-        """Generate GDP growth rate (quarterly changes)"""
-        n_quarters = n_days // 90 + 1
-        quarterly_growth = np.random.normal(0.02, 0.015, n_quarters)
-        quarterly_growth = np.clip(quarterly_growth, -0.02, 0.04)
-        
-        # Expand to daily (constant within quarter)
-        daily_growth = np.repeat(quarterly_growth, 90)[:n_days]
-        return daily_growth
-    
-    def _generate_industry_index(self, n_days):
-        """Generate auto insurance industry health index"""
-        # Long-term trend
-        trend = np.linspace(65, 75, n_days)
-        
-        # Business cycles
-        cycle = 8 * np.sin(2 * np.pi * np.arange(n_days) / 730)  # 2-year cycle
-        
-        # Random shocks
-        shocks = np.random.normal(0, 2, n_days)
-        
-        index = trend + cycle + shocks
-        return np.clip(index, 40, 95)
-    
-    def merge_with_customer_data(self, external_data):
+
+        return signals_df
+
+    def _mean_reverting_random_walk(self, n: int, mean: float, volatility: float, start: float, reversion_rate: float) -> np.ndarray:
         """
-        RULE 8: Merge external data with customer data based on dates
-        Each customer record gets the external market conditions from their date
+        Generates a mean-reverting random walk time series.
         """
-        print("\n" + "="*60)
-        print("[RULE 8] Merging External Data with Customer Records")
-        print("="*60)
-        print("  - Each customer gets market conditions from their 'cust_orig_date'")
-        print("  - Like looking up stock price on the day they joined")
+        series = np.zeros(n)
+        series[0] = start
+        for i in range(1, n):
+            # The series is pulled towards the mean, plus some random noise
+            series[i] = series[i-1] + (mean - series[i-1]) * reversion_rate + np.random.normal(0, volatility)
+        return np.clip(series, mean - 3*volatility, mean + 3*volatility) # Clip to reasonable bounds
+
+    def merge_with_customers(self, customer_df: pd.DataFrame, signals_df: pd.DataFrame, 
+                             date_col: str = 'cust_orig_date') -> pd.DataFrame:
+        """
+        Merges generated signals with customer data based on a date column.
+        The external signals are associated with the customer's original date.
         
-        df_merged = self.df.copy()
+        Args:
+            customer_df: The DataFrame containing customer information.
+            signals_df: The DataFrame containing generated time-series signals with a 'date' column.
+            date_col: The name of the date column in customer_df to use for merging.
+
+        Returns:
+            The customer DataFrame augmented with the merged signals.
+        """
+        df_merged = customer_df.copy()
         
-        # Convert customer date to datetime
-        if 'cust_orig_date' in df_merged.columns:
-            df_merged['cust_orig_date'] = pd.to_datetime(df_merged['cust_orig_date'])
+        if date_col not in df_merged.columns:
+            raise ValueError(f"Date column '{date_col}' not found in customer_df.")
             
-            # Merge external data based on date
-            df_merged = df_merged.merge(
-                external_data,
-                left_on='cust_orig_date',
-                right_on='date',
-                how='left'
-            )
-            
-            # Fill any missing dates with nearby values
-            for col in external_data.columns:
-                if col != 'date' and col in df_merged.columns:
-                    df_merged[col].fillna(method='ffill', inplace=True)
-                    df_merged[col].fillna(method='bfill', inplace=True)
+        df_merged[date_col] = pd.to_datetime(df_merged[date_col])
         
-        print(f"  - Merged {len(external_data.columns)-1} external features")
+        # Perform a left merge to add signals to customer data
+        df_merged = df_merged.merge(
+            signals_df, left_on=date_col, right_on='date', how='left'
+        )
         
+        # Fill missing signals (for cust_orig_date outside the signals date range)
+        signal_cols = signals_df.columns.drop('date').tolist()
+        
+        for col in signal_cols:
+            if df_merged[col].isnull().any():
+                df_merged[col].fillna(method='ffill', inplace=True)
+                df_merged[col].fillna(method='bfill', inplace=True)
+                if df_merged[col].isnull().any(): # If still missing (e.g., all NaNs in a column)
+                    df_merged[col].fillna(df_merged[col].mean(), inplace=True) # Fallback to mean
+
+        df_merged.drop('date', axis=1, inplace=True) # Drop the merge key from signals_df
+        
+        print(f"Successfully merged {len(signal_cols)} signals with customer data.")
         return df_merged
 
 
-class MultiGPUSyntheticDataGenerator:
-    """Generates synthetic data using CTGAN with multi-GPU support"""
-    
-    def __init__(self, df, gpu_ids=[0, 1, 2, 3]):
-        self.df = df
-        self.gpu_ids = gpu_ids
-        self.models = []
-        
-    def prepare_data(self):
-        """Prepare data for CTGAN"""
-        print("\n" + "="*60)
-        print("Preparing Data for CTGAN Training")
-        print("="*60)
-        df_prepared = self.df.copy()
-        
-        # Handle date columns
-        date_cols = df_prepared.select_dtypes(include=['datetime64']).columns
-        for col in date_cols:
-            df_prepared[col] = df_prepared[col].astype(str)
+# ===============================
+# 3️⃣ Synthetic Data Analyzer
+# ===============================
+class SyntheticDataAnalyzer:
+    """
+    Analyzes the quality of synthetic signals by comparing statistical properties
+    and impact on feature importance.
+    """
+    def __init__(self, real_df: pd.DataFrame, synthetic_df: pd.DataFrame,
+                 target_col: str = Config.TARGET_COLUMN):
+        self.real_df = real_df
+        self.synthetic_df = synthetic_df
+        self.target_col = target_col
+        self.common_numeric_cols = self._get_common_numeric_cols()
+        self.new_signal_cols = self._get_new_signal_cols()
+
+    def _get_numeric_cols(self, df: pd.DataFrame) -> list[str]:
+        """Helper to get numeric columns from a DataFrame."""
+        return [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+
+    def _get_common_numeric_cols(self) -> list[str]:
+        """Identifies numeric columns present in both real_df and synthetic_df."""
+        real_numeric = set(self._get_numeric_cols(self.real_df))
+        synth_numeric = set(self._get_numeric_cols(self.synthetic_df))
+        return sorted(list(real_numeric.intersection(synth_numeric)))
+
+    def _get_new_signal_cols(self) -> list[str]:
+        """Identifies newly added numeric signal columns in synthetic_df."""
+        real_cols = set(self.real_df.columns)
+        synth_numeric_cols = set(self._get_numeric_cols(self.synthetic_df))
+        new_cols = synth_numeric_cols.difference(real_cols)
+        return sorted(list(new_cols))
+
+    def analyze(self):
+        print("\n--- SYNTHETIC DATA ANALYSIS ---")
+        self._compare_common_distributions()
+        self._analyze_new_signal_distributions()
+        self._compare_correlations()
+        self._feature_importance_preservation()
+
+    def _compare_common_distributions(self):
+        """
+        Compares distributions of common numeric columns between real and synthetic data.
+        These should ideally be identical if the original data was just augmented.
+        """
+        print("\n1. Distribution Comparison (Common Numeric Columns):")
+        if not self.common_numeric_cols:
+            print("No common numeric columns found to compare distributions.")
+            return
+
+        for col in self.common_numeric_cols:
+            # Skip the target column for KS/KL as it's typically categorical and exact match is expected
+            if col == self.target_col:
+                continue 
             
-        # Fill missing values
-        for col in df_prepared.columns:
-            if df_prepared[col].dtype == 'object':
-                df_prepared[col].fillna('Unknown', inplace=True)
-            else:
-                df_prepared[col].fillna(df_prepared[col].median(), inplace=True)
-        
-        print(f"  - Dataset shape: {df_prepared.shape}")
-        print(f"  - Features: {df_prepared.shape[1]}")
-        
-        return df_prepared
-    
-    def train_ctgan_single_gpu(self, gpu_id, data, epochs):
-        """Train CTGAN on a single GPU"""
-        try:
-            from ctgan import CTGAN
+            # Ensure no NaNs as KS-test requires no missing values
+            real_data = self.real_df[col].dropna()
+            synth_data = self.synthetic_df[col].dropna()
             
-            device = f'cuda:{gpu_id}'
-            print(f"\n[GPU {gpu_id}] Starting training...")
-            
-            model = CTGAN(
-                epochs=epochs,
-                batch_size=1000,
-                generator_dim=(512, 512, 512),
-                discriminator_dim=(512, 512, 512),
-                pac=10,
-                cuda=device
-            )
-            
-            model.fit(data)
-            print(f"[GPU {gpu_id}] Training complete!")
-            
-            return model
-            
-        except Exception as e:
-            print(f"[GPU {gpu_id}] Error: {e}")
-            return None
-    
-    def train_multi_gpu(self, epochs=300):
-        """Train multiple CTGAN models in parallel across GPUs"""
-        try:
-            from ctgan import CTGAN
-            
-            print("\n" + "="*60)
-            print(f"Training {len(self.gpu_ids)} CTGAN Models on {len(self.gpu_ids)} GPUs")
-            print("="*60)
-            
-            df_prepared = self.prepare_data()
-            
-            from concurrent.futures import ProcessPoolExecutor
-            
-            with ProcessPoolExecutor(max_workers=len(self.gpu_ids)) as executor:
-                futures = []
-                for gpu_id in self.gpu_ids:
-                    future = executor.submit(
-                        self.train_ctgan_single_gpu, 
-                        gpu_id, 
-                        df_prepared, 
-                        epochs
-                    )
-                    futures.append((gpu_id, future))
+            if not real_data.empty and not synth_data.empty:
+                ks_stat, ks_p = ks_2samp(real_data, synth_data)
                 
-                for gpu_id, future in futures:
-                    try:
-                        model = future.result()
-                        if model is not None:
-                            self.models.append(model)
-                    except Exception as e:
-                        print(f"[GPU {gpu_id}] Failed: {e}")
+                # For KL divergence, create histograms. Add small epsilon to avoid log(0)
+                hist_real, _ = np.histogram(real_data, bins=50, density=True)
+                hist_synth, _ = np.histogram(synth_data, bins=50, density=True)
+                kl_div = entropy(hist_real + 1e-8, hist_synth + 1e-8)
+                print(f"  {col:25} KS_Stat={ks_stat:.4f} (p={ks_p:.4f}) KL_Div={kl_div:.4f}")
+            else:
+                print(f"  {col:25} Skipped (contains empty data after dropping NaNs).")
+                
+        print("  (Expected KS_Stat ~0 and KL_Div ~0 for common columns as original data is preserved)")
+
+    def _analyze_new_signal_distributions(self):
+        """
+        Analyzes and visualizes the distributions of the newly generated synthetic signals.
+        """
+        print("\n2. Analysis of New Synthetic Signal Distributions:")
+        if not self.new_signal_cols:
+            print("No new signal columns detected in the synthetic DataFrame.")
+            return
+
+        plt.figure(figsize=(15, 5 * (len(self.new_signal_cols) // 3 + 1)))
+        for i, col in enumerate(self.new_signal_cols):
+            print(f"  {col:25} Mean={self.synthetic_df[col].mean():.4f}, "
+                  f"Std={self.synthetic_df[col].std():.4f}, "
+                  f"Min={self.synthetic_df[col].min():.4f}, "
+                  f"Max={self.synthetic_df[col].max():.4f}")
             
-            print(f"\n✓ Successfully trained {len(self.models)} models!")
+            plt.subplot(len(self.new_signal_cols) // 3 + 1, 3, i + 1)
+            sns.histplot(self.synthetic_df[col], kde=True, bins=30)
+            plt.title(f'Distribution of {col}')
+        plt.tight_layout()
+        plt.savefig(os.path.join(Config.PLOT_DIR, 'new_signal_distributions.png'))
+        plt.close()
+        print(f"  Histogram plots saved to {Config.PLOT_DIR}/new_signal_distributions.png")
+
+    def _compare_correlations(self):
+        """
+        Compares correlation matrices and highlights correlations involving new signals.
+        """
+        print("\n3. Correlation Analysis:")
+        
+        # Correlation for original features
+        real_corr = self.real_df[self.common_numeric_cols].corr()
+        print(f"\n  Original Feature Correlation Matrix (first 5x5):\n{real_corr.head(5).iloc[:, :5]}")
+
+        # Correlation for augmented data (all numeric features)
+        all_numeric_augmented_cols = self._get_numeric_cols(self.synthetic_df)
+        synth_full_corr = self.synthetic_df[all_numeric_augmented_cols].corr()
+        print(f"\n  Augmented Data Full Correlation Matrix (first 5x5 including new signals):\n{synth_full_corr.head(5).iloc[:, :5]}")
+        
+        # If new signals exist, show their correlations
+        if self.new_signal_cols:
+            print("\n  Correlations of New Signals with Churn and other Signals:")
+            # Correlations of new signals with the target
+            if self.target_col in synth_full_corr.index:
+                new_signal_target_corr = synth_full_corr.loc[self.new_signal_cols, self.target_col].sort_values(ascending=False)
+                print(f"    New Signal vs. {self.target_col}:\n{new_signal_target_corr}")
+
+            # Correlations among new signals
+            new_signals_only_corr = self.synthetic_df[self.new_signal_cols].corr()
+            print(f"\n    Correlation among New Signals (first 5x5):\n{new_signals_only_corr.head(5).iloc[:, :5]}")
             
-        except ImportError:
-            print("ERROR: CTGAN not installed")
-            print("Install: pip install ctgan torch")
-            return None
-    
-    def generate_synthetic_data(self, n_samples):
-        """Generate synthetic data using all trained models"""
-        if not self.models:
-            print("ERROR: No models trained")
-            return None
+            # Visualize full augmented correlation matrix
+            plt.figure(figsize=(12, 10))
+            sns.heatmap(synth_full_corr, annot=False, cmap='coolwarm', fmt=".2f", linewidths=.5)
+            plt.title('Correlation Matrix of Augmented Data')
+            plt.savefig(os.path.join(Config.PLOT_DIR, 'augmented_correlation_matrix.png'))
+            plt.close()
+            print(f"  Full correlation heatmap saved to {Config.PLOT_DIR}/augmented_correlation_matrix.png")
+
+    def _feature_importance_preservation(self):
+        """
+        Compares feature importances for 'Churn' prediction using RandomForest
+        on the original balanced data versus the augmented data.
+        """
+        print("\n4. Feature Importance Analysis (RandomForest for Churn Prediction):")
+        if self.target_col not in self.real_df.columns or self.target_col not in self.synthetic_df.columns:
+            print(f"  Target column '{self.target_col}' missing, skipping Feature Importance check.")
+            return
+
+        # Prepare data for RF models
+        X_real = self.real_df[self.common_numeric_cols].drop(columns=[self.target_col], errors='ignore')
+        y_real = self.real_df[self.target_col]
         
-        print("\n" + "="*60)
-        print(f"Generating {n_samples:,} Synthetic Samples")
-        print("="*60)
+        X_synth = self.synthetic_df[self._get_numeric_cols(self.synthetic_df)].drop(columns=[self.target_col], errors='ignore')
+        y_synth = self.synthetic_df[self.target_col]
+
+        # Ensure no non-numeric columns remain, and handle potential NaNs
+        X_real = X_real.select_dtypes(include=np.number).fillna(X_real.mean())
+        X_synth = X_synth.select_dtypes(include=np.number).fillna(X_synth.mean())
+
+        if X_real.empty or X_synth.empty or y_real.empty or y_synth.empty:
+            print("  Insufficient numeric data or target for Feature Importance analysis.")
+            return
+
+        # Train on real (balanced) data
+        rf_real = RandomForestClassifier(n_estimators=100, random_state=Config.RANDOM_STATE, n_jobs=-1)
+        rf_real.fit(X_real, y_real)
+        importances_real = pd.Series(rf_real.feature_importances_, index=X_real.columns).sort_values(ascending=False)
         
-        samples_per_model = n_samples // len(self.models)
-        remainder = n_samples % len(self.models)
+        # Train on synthetic (augmented) data
+        rf_synth = RandomForestClassifier(n_estimators=100, random_state=Config.RANDOM_STATE, n_jobs=-1)
+        rf_synth.fit(X_synth, y_synth)
+        importances_synth = pd.Series(rf_synth.feature_importances_, index=X_synth.columns).sort_values(ascending=False)
+
+        print("\n  Top features from original (balanced) data:")
+        print(importances_real.head(10).to_string())
+
+        print("\n  Top features from augmented data (including new signals):")
+        print(importances_synth.head(10).to_string())
         
-        all_synthetic_data = []
+        # Compare and plot
+        plt.figure(figsize=(15, 6))
         
-        for i, model in enumerate(self.models):
-            n_samples_this_model = samples_per_model + (1 if i < remainder else 0)
-            print(f"  Model {i+1}: Generating {n_samples_this_model:,} samples...")
-            
-            synthetic_data = model.sample(n_samples_this_model)
-            all_synthetic_data.append(synthetic_data)
+        plt.subplot(1, 2, 1)
+        sns.barplot(x=importances_real.head(10).values, y=importances_real.head(10).index)
+        plt.title('Feature Importances (Original Balanced Data)')
         
-        combined_synthetic_data = pd.concat(all_synthetic_data, ignore_index=True)
+        plt.subplot(1, 2, 2)
+        sns.barplot(x=importances_synth.head(10).values, y=importances_synth.head(10).index)
+        plt.title('Feature Importances (Augmented Data with Signals)')
         
-        print(f"\n✓ Total generated: {len(combined_synthetic_data):,} samples")
-        return combined_synthetic_data
+        plt.tight_layout()
+        plt.savefig(os.path.join(Config.PLOT_DIR, 'feature_importances_comparison.png'))
+        plt.close()
+        print(f"  Feature importance plots saved to {Config.PLOT_DIR}/feature_importances_comparison.png")
 
 
+# ===============================
+# 4️⃣ Main Execution
+# ===============================
 def main():
-    """Main execution workflow"""
+    print("=== SMART NON-LINEAR DATA AUGMENTATION (Optimized) ===")
     
-    print("=" * 80)
-    print("SYNTHETIC DATASET GENERATOR WITH EXTERNAL MARKET DATA")
-    print("Hardware: 4 GPUs | 40 CPU Cores")
-    print("=" * 80)
-    
-    # Load your data
-    df = pd.read_csv('autoinsurance_churn_cleaned.csv')
-    print(f"\nOriginal dataset: {df.shape[0]:,} rows, {df.shape[1]} columns")
-    
-    # Step 1: Analyze original dataset
-    analyzer = DatasetAnalyzer(df, n_jobs=40)
-    stats, correlations = analyzer.run_full_analysis()
-    
-    # Step 2: Generate EXTERNAL independent data
-    external_sim = ExternalDataSimulator(df)
-    external_data = external_sim.generate_time_series_data()
-    
-    print(f"\nExternal data generated: {len(external_data):,} days of market data")
-    print("\nExternal features:")
-    for col in external_data.columns:
-        if col != 'date':
-            print(f"  - {col}")
-    
-    # Step 3: Merge external data with customer records
-    df_enhanced = external_sim.merge_with_customer_data(external_data)
-    
-    print(f"\nEnhanced dataset: {df_enhanced.shape[0]:,} rows, {df_enhanced.shape[1]} columns")
-    print(f"New external features added: {df_enhanced.shape[1] - df.shape[1]}")
-    
-    # Display sample
-    print("\n" + "="*60)
-    print("Sample of Enhanced Data (with external market data)")
-    print("="*60)
-    display_cols = ['cust_orig_date', 'company_sentiment', 'company_stock_return', 
-                    'competitor_sentiment', 'gdp_growth_rate', 'Churn']
-    available_cols = [col for col in display_cols if col in df_enhanced.columns]
-    print(df_enhanced[available_cols].head(10))
-    
-    # Step 4: Train CTGAN and generate synthetic data
-    print("\n" + "="*80)
-    print("CTGAN SYNTHETIC DATA GENERATION")
-    print("="*80)
-    
-    gpu_ids = [0, 1, 2, 3]
-    synth_gen = MultiGPUSyntheticDataGenerator(df_enhanced, gpu_ids=gpu_ids)
-    
-    synth_gen.train_multi_gpu(epochs=300)
-    
-    n_synthetic_samples = len(df) * 100
-    synthetic_df = synth_gen.generate_synthetic_data(n_synthetic_samples)
-    
-    if synthetic_df is not None:
-        print("\n" + "="*80)
-        print("FINAL RESULTS")
-        print("="*80)
-        print(f"Original: {df.shape[0]:,} rows, {df.shape[1]} columns")
-        print(f"Enhanced: {df_enhanced.shape[0]:,} rows, {df_enhanced.shape[1]} columns")
-        print(f"Synthetic: {synthetic_df.shape[0]:,} rows, {synthetic_df.shape[1]} columns")
-        print(f"Multiplier: {len(synthetic_df) / len(df):.0f}x")
-        
-        # Save outputs
-        print("\nSaving files...")
-        df_enhanced.to_csv('enhanced_with_external_data.csv', index=False)
-        synthetic_df.to_csv('synthetic_data_large.csv', index=False)
-        external_data.to_csv('external_market_data.csv', index=False)
-        
-        import json
-        with open('dataset_statistics.json', 'w') as f:
-            json.dump(stats, f, indent=2, default=str)
-        
-        print("\n" + "="*80)
-        print("FILES SAVED:")
-        print("  1. enhanced_with_external_data.csv - Original + external market data")
-        print("  2. synthetic_data_large.csv - Large synthetic dataset")
-        print("  3. external_market_data.csv - Time series of market conditions")
-        print("  4. dataset_statistics.json - Statistical analysis")
-        print("="*80)
-    
-    return df_enhanced, synthetic_df, external_data
+    try:
+        df = pd.read_csv('autoinsurance_churn_cleaned.csv')
+        print(f"Loaded {len(df):,} rows from 'autoinsurance_churn_cleaned.csv'")
+    except FileNotFoundError:
+        print("Error: 'autoinsurance_churn_cleaned.csv' not found. Please ensure the file is in the same directory.")
+        return
+
+    # Convert 'cust_orig_date' to datetime upfront if it exists
+    if 'cust_orig_date' in df.columns:
+        df['cust_orig_date'] = pd.to_datetime(df['cust_orig_date'], errors='coerce')
+        # Drop rows where date conversion failed if necessary, or fill with a sensible value
+        df.dropna(subset=['cust_orig_date'], inplace=True)
+        print(f"Converted 'cust_orig_date' to datetime. {len(df):,} rows remaining after dropping NaNs in date.")
+    else:
+        print("Warning: 'cust_orig_date' column not found. Signal merging might be affected.")
+
+    # Step 1: Balanced sample
+    print("\n--- Step 1: Balancing the dataset ---")
+    sampler = BalancedDataSampler(df, target_col=Config.TARGET_COLUMN)
+    df_balanced = sampler.get_balanced_sample(n_samples=Config.N_SAMPLES_BALANCED)
+
+    # Step 2: Generate non-linear signals
+    print("\n--- Step 2: Generating non-linear synthetic signals ---")
+    generator = NonLinearSignalGenerator(
+        start_date=Config.SIGNAL_START_DATE,
+        end_date=Config.SIGNAL_END_DATE
+    )
+    signals = generator.generate_signals()
+
+    # Step 3: Merge with customer data
+    print("\n--- Step 3: Merging signals with customer data ---")
+    df_augmented = generator.merge_with_customers(df_balanced, signals, date_col='cust_orig_date')
+
+    # Step 4: Analyze signals
+    print("\n--- Step 4: Analyzing synthetic data quality ---")
+    analyzer = SyntheticDataAnalyzer(df_balanced, df_augmented, target_col=Config.TARGET_COLUMN)
+    analyzer.analyze()
+
+    # Step 5: Save files
+    print("\n--- Step 5: Saving processed data files ---")
+    df_balanced.to_csv(Config.OUTPUT_BALANCED_CSV, index=False)
+    df_augmented.to_csv(Config.OUTPUT_AUGMENTED_CSV, index=False)
+    signals.to_csv(Config.OUTPUT_SIGNALS_CSV, index=False)
+    print(f"  Balanced sample saved to '{Config.OUTPUT_BALANCED_CSV}'")
+    print(f"  Augmented data saved to '{Config.OUTPUT_AUGMENTED_CSV}'")
+    print(f"  Synthetic time-series signals saved to '{Config.OUTPUT_SIGNALS_CSV}'")
+    print("\nProcessing complete!")
+
+    return df_balanced, df_augmented, signals
 
 
 if __name__ == "__main__":
-    mp.set_start_method('spawn', force=True)
-    enhanced_data, synthetic_data, external_data = main()
+    balanced_data, augmented_data, signals = main()
