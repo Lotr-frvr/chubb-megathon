@@ -26,7 +26,7 @@ else:
 # ===============================
 class Config:
     """Centralized configuration for the data augmentation pipeline."""
-    N_SAMPLES_BALANCED: int = 500
+    N_SAMPLES_BALANCED: int = 10000
     TARGET_COLUMN: str = 'Churn'
     RANDOM_STATE: int = 42
     SIGNAL_START_DATE: str = '2018-01-01'
@@ -41,7 +41,7 @@ class Config:
     GDP_GROWTH_VOLATILITY: float = 0.0005
     CUSTOMER_ENGAGEMENT_BETA_A: float = 2
     CUSTOMER_ENGAGEMENT_BETA_B: float = 5
-    OUTPUT_BALANCED_CSV: str = 'balanced_sample_500.csv'
+    OUTPUT_BALANCED_CSV: str = 'balanced_sample_10000.csv'
     OUTPUT_AUGMENTED_CSV: str = 'augmented_with_signals.csv'
     OUTPUT_SIGNALS_CSV: str = 'synthetic_time_series_signals.csv'
     PLOT_DIR: str = 'plots' # Directory for saving plots
