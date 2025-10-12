@@ -60,5 +60,9 @@
 
 ### 5. **EBMs and Explainability**
 
-- **Description:** Utilizes Explainable Boosting Machines (EBMs) for interpretable machine learning. EBMs are open-box models that provide transparency and insights into the decision-making process
+- **Description:** Utilizes Explainable Boosting Machines (EBMs) for interpretable machine learning. EBMs are open-box models that provide transparency and insights into the decision-making process.
+
+## Note on UI Code
+
+The UI code for this project will be maintained in a separate branch named `UI`. Please switch to the `UI` branch to access and work on the user interface components.
 
