@@ -56,8 +56,8 @@ for col in cat_cols:
 # Part 5 - Training and testing division
 feat_cols = ['curr_ann_amt', 'days_tenure', 'age_in_years', 'income', 
              'has_children', 'length_of_residence', 'marital_status', 
-             'home_owner', 'college_degree', 'good_credit']
-feat_cols.extend(['chubb_sentiment','competitor_sentiment','chubb_stock_return','competitor_stock_return','market_index_return','gdp_growth','customer_engagement'])
+             'home_owner', 'college_degree', 'good_credit','city','state']
+feat_cols.extend(['chubb_sentiment','competitor_sentiment','chubb_stock_return','competitor_stock_return','market_index_return','customer_engagement'])
 X = df[feat_cols]
 y = df['Churn']
 
@@ -304,14 +304,6 @@ for col in cat_cols:
     le = LabelEncoder()
     df[col] = le.fit_transform(df[col])
     le_dict[col] = le
-
-# Part 5 - Training and testing division
-feat_cols = ['curr_ann_amt', 'days_tenure', 'age_in_years', 'income', 
-             'has_children', 'length_of_residence', 'marital_status', 
-             'home_owner', 'college_degree', 'good_credit']
-feat_cols.extend(['chubb_sentiment','competitor_sentiment','chubb_stock_return','competitor_stock_return','market_index_return','gdp_growth','customer_engagement'])
-X = df[feat_cols]
-y = df['Churn']
 
 print(f"\nX shape: {X.shape}")
 print(f"y shape: {y.shape}")

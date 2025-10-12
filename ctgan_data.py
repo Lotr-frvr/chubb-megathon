@@ -33,11 +33,11 @@ metadata.save_to_json(filepath='metadata.json')
 print("Initializing CTGANSynthesizer...")
 synthesizer = CTGANSynthesizer(
     metadata,
-    batch_size=1000,  # Increased batch size
-    epochs=500,  # Increased epochs for the larger model
-    embedding_dim=256,  # Increased model complexity
-    generator_dim=(512, 512),  # Increased model complexity
-    discriminator_dim=(512, 512),  # Increased model complexity
+    batch_size=1240,  # Increased batch size
+    epochs=1000,  # Increased epochs for the larger model
+    embedding_dim=512,  # Increased model complexity
+    generator_dim=(1024, 1024),  # Increased model complexity
+    discriminator_dim=(1024, 1024),  # Increased model complexity
     cuda=use_cuda,
     verbose=True  # This will print training progress
 )
@@ -46,7 +46,7 @@ print("Training the CTGAN model...")
 synthesizer.fit(df_numeric)
 
 # Generate synthetic data to reach 10,000 rows
-num_synthetic_samples = 10000 - len(df_numeric)
+num_synthetic_samples = 400000 - len(df_numeric)
 print(f"Generating {num_synthetic_samples} new synthetic samples...")
 synthetic_data = synthesizer.sample(
     num_rows=num_synthetic_samples
@@ -68,7 +68,7 @@ correlation_matrix.to_csv('correlation_matrix_final.csv')
 
 # Visualize correlation matrix
 plt.figure(figsize=(12, 10))
-sns.heatmap(correlation_matrix, annot=False, fmt='.2f', cmap='coolwarm', center=0) # annot=False for large matrices
+sns.heatmap(correlation_matrix, annot=True, fmt='.2f', cmap='coolwarm', center=0) # annot=False for large matrices
 plt.title('Correlation Matrix - Final Data (10,000 rows)')
 plt.tight_layout()
 plt.savefig('correlation_matrix_final.png')

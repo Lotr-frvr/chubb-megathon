@@ -1,0 +1,71 @@
+{
+    "columns": {
+        "individual_id": {
+            "sdtype": "id"
+        },
+        "address_id": {
+            "sdtype": "id"
+        },
+        "curr_ann_amt": {
+            "sdtype": "numerical"
+        },
+        "days_tenure": {
+            "sdtype": "numerical"
+        },
+        "age_in_years": {
+            "sdtype": "numerical"
+        },
+        "latitude": {
+            "pii": true,
+            "sdtype": "latitude"
+        },
+        "longitude": {
+            "pii": true,
+            "sdtype": "longitude"
+        },
+        "income": {
+            "sdtype": "numerical"
+        },
+        "has_children": {
+            "sdtype": "categorical"
+        },
+        "length_of_residence": {
+            "sdtype": "numerical"
+        },
+        "home_owner": {
+            "sdtype": "categorical"
+        },
+        "college_degree": {
+            "sdtype": "categorical"
+        },
+        "good_credit": {
+            "sdtype": "categorical"
+        },
+        "Churn": {
+            "sdtype": "categorical"
+        },
+        "chubb_sentiment": {
+            "sdtype": "numerical"
+        },
+        "competitor_sentiment": {
+            "sdtype": "numerical"
+        },
+        "chubb_stock_return": {
+            "sdtype": "numerical"
+        },
+        "competitor_stock_return": {
+            "sdtype": "numerical"
+        },
+        "market_index_return": {
+            "sdtype": "numerical"
+        },
+        "gdp_growth": {
+            "sdtype": "numerical"
+        },
+        "customer_engagement": {
+            "sdtype": "numerical"
+        }
+    },
+    "METADATA_SPEC_VERSION": "SINGLE_TABLE_V1",
+    "primary_key": "individual_id"
+}

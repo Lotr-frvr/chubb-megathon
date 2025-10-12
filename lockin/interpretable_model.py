@@ -25,12 +25,11 @@ for col in cat_cols:
     le_dict[col] = le
 
 # Part 5 - Features and Target
-feat_cols = ['curr_ann_amt', 'days_tenure', 'age_in_years', 'income',
-             'has_children', 'length_of_residence', 'marital_status',
-             'home_owner', 'college_degree', 'good_credit']
-feat_cols.extend(['chubb_sentiment', 'competitor_sentiment', 'chubb_stock_return',
-                 'competitor_stock_return', 'market_index_return', 'gdp_growth', 
-                 'customer_engagement'])
+feat_cols = ['curr_ann_amt', 'days_tenure', 'age_in_years', 'income', 
+             'has_children', 'length_of_residence', 'marital_status', 
+             'home_owner', 'college_degree', 'good_credit','city','state']
+feat_cols.extend(['chubb_sentiment','competitor_sentiment','chubb_stock_return','competitor_stock_return','market_index_return','customer_engagement'])
+
 X = df[feat_cols]
 y = df['Churn']
 
@@ -104,4 +103,4 @@ disp = ConfusionMatrixDisplay(confusion_matrix=cm,
                                 display_labels=ebm.classes_)
 disp.plot(cmap=plt.cm.Blues)
 # save the plot
-plt.savefig("ebm_confusion_matrix.png")
+plt.savefig("ebm_confusion_matrix.png") 
